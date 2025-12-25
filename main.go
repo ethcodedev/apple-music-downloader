@@ -1625,6 +1625,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 
 }
 func ripPlaylist(playlistId string, token string, storefront string, mediaUserToken string) error {
+	// Cache for album covers to avoid redundant downloads
 	albumCoverCache := map[string]string{}
 	playlist := task.NewPlaylist(storefront, playlistId)
 	err := playlist.GetResp(token, Config.Language)
@@ -1777,19 +1778,6 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 	os.MkdirAll(playlistFolderPath, os.ModePerm)
 	playlist.SaveName = playlistFolder
 	fmt.Println(playlistFolder)
-	/*
-		covPath, err := writeCover(playlistFolderPath, "cover", meta.Data[0].Attributes.Artwork.URL)
-		if err != nil {
-			fmt.Println("Failed to write cover.")
-		}*/
-
-	//This is setting each track to have the same global, playlist cover art.
-	/*
-		for i := range playlist.Tracks {
-			playlist.Tracks[i].CoverPath = covPath
-			playlist.Tracks[i].SaveDir = playlistFolderPath
-			playlist.Tracks[i].Codec = Codec
-		}*/
 
 	// Now, each track will have its own cover art fetched during download (no globally applied playlist cover)
 	for i := range playlist.Tracks {
