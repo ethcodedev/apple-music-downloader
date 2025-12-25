@@ -1071,7 +1071,8 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		"artist=AppleMusic",
 	}
 	if Config.EmbedCover {
-		if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
+		// We already resolved the correct cover earlier, don't rewrite it
+		if track.CoverPath == "" && Config.DlAlbumcoverForPlaylist {
 			track.CoverPath, err = writeCover(track.SaveDir, track.ID, track.Resp.Attributes.Artwork.URL)
 			if err != nil {
 				fmt.Println("Failed to write cover.")
@@ -1624,6 +1625,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 
 }
 func ripPlaylist(playlistId string, token string, storefront string, mediaUserToken string) error {
+	albumCoverCache := map[string]string{}
 	playlist := task.NewPlaylist(storefront, playlistId)
 	err := playlist.GetResp(token, Config.Language)
 	if err != nil {
@@ -1775,13 +1777,22 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 	os.MkdirAll(playlistFolderPath, os.ModePerm)
 	playlist.SaveName = playlistFolder
 	fmt.Println(playlistFolder)
-	covPath, err := writeCover(playlistFolderPath, "cover", meta.Data[0].Attributes.Artwork.URL)
-	if err != nil {
-		fmt.Println("Failed to write cover.")
-	}
+	/*
+		covPath, err := writeCover(playlistFolderPath, "cover", meta.Data[0].Attributes.Artwork.URL)
+		if err != nil {
+			fmt.Println("Failed to write cover.")
+		}*/
 
+	//This is setting each track to have the same global, playlist cover art.
+	/*
+		for i := range playlist.Tracks {
+			playlist.Tracks[i].CoverPath = covPath
+			playlist.Tracks[i].SaveDir = playlistFolderPath
+			playlist.Tracks[i].Codec = Codec
+		}*/
+
+	// Now, each track will have its own cover art fetched during download (no globally applied playlist cover)
 	for i := range playlist.Tracks {
-		playlist.Tracks[i].CoverPath = covPath
 		playlist.Tracks[i].SaveDir = playlistFolderPath
 		playlist.Tracks[i].Codec = Codec
 	}
@@ -1859,6 +1870,35 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 			continue
 		}
 		if isInArray(selected, i) {
+			trackMeta := meta.Data[0].Relationships.Tracks.Data[i-1]
+			songID := trackMeta.ID
+
+			// Fetch song metadata (already allowed + used elsewhere)
+			songResp, err := ampapi.GetSongResp(storefront, songID, playlist.Language, token)
+			if err == nil && len(songResp.Data) > 0 {
+
+				// Prefer album artwork
+				if len(songResp.Data[0].Relationships.Albums.Data) > 0 {
+					album := songResp.Data[0].Relationships.Albums.Data[0]
+					albumID := album.ID
+
+					// Cache hit
+					if cached, ok := albumCoverCache[albumID]; ok {
+						playlist.Tracks[i-1].CoverPath = cached
+					} else if album.Attributes.Artwork.URL != "" {
+						coverName := "cover_album_" + albumID
+						covPath, err := writeCover(
+							playlistFolderPath,
+							coverName,
+							album.Attributes.Artwork.URL,
+						)
+						if err == nil {
+							albumCoverCache[albumID] = covPath
+							playlist.Tracks[i-1].CoverPath = covPath
+						}
+					}
+				}
+			}
 			ripTrack(&playlist.Tracks[i-1], token, mediaUserToken)
 		}
 	}
