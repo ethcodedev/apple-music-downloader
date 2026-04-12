@@ -143,6 +143,67 @@ func fileExists(path string) (bool, error) {
 	return false, err
 }
 
+func normalizeTrackTitle(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ToLower(s)
+	s = strings.Join(strings.Fields(s), " ")
+	return s
+}
+
+func stripTrackNumberPrefix(filename string) string {
+	stem := strings.TrimSuffix(filename, filepath.Ext(filename))
+
+	// Remove leading "123. " pattern
+	re := regexp.MustCompile(`^\s*\d+\.\s*`)
+	stem = re.ReplaceAllString(stem, "")
+
+	return strings.TrimSpace(stem)
+}
+
+func duplicateTrackExistsByTitle(dir string, title string) (bool, string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, "", err
+	}
+
+	target := normalizeTrackTitle(title)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if strings.ToLower(filepath.Ext(name)) != ".m4a" {
+			continue
+		}
+
+		existingTitle := stripTrackNumberPrefix(name)
+		existingTitle = normalizeTrackTitle(existingTitle)
+
+		if existingTitle == target {
+			return true, filepath.Join(dir, name), nil
+		}
+	}
+
+	return false, "", nil
+}
+
+func buildTrackFilename(track *task.Track) string {
+	songName := strings.NewReplacer(
+		"{SongId}", track.ID,
+		"{SongNumer}", fmt.Sprintf("%02d", track.TaskNum),
+		"{SongName}", LimitString(track.Resp.Attributes.Name),
+		"{DiscNumber}", fmt.Sprintf("%0d", track.Resp.Attributes.DiscNumber),
+		"{TrackNumber}", fmt.Sprintf("%0d", track.Resp.Attributes.TrackNumber),
+		"{Quality}", track.Quality,
+		"{Tag}", "",
+		"{Codec}", track.Codec,
+	).Replace(Config.SongFileFormat)
+
+	return fmt.Sprintf("%s.m4a", forbiddenNames.ReplaceAllString(songName, "_"))
+}
+
 func checkUrl(url string) (string, string) {
 	pat := regexp.MustCompile(`^(?:https:\/\/(?:beta\.music|music|classical\.music)\.apple\.com\/(\w{2})(?:\/album|\/album\/.+))\/(?:id)?(\d[^\D]+)(?:$|\?)`)
 	matches := pat.FindAllStringSubmatch(url, -1)
@@ -1858,21 +1919,48 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 			continue
 		}
 		if isInArray(selected, i) {
+			track := &playlist.Tracks[i-1]
+
+			// Build expected output filename/path first
+			track.SaveName = buildTrackFilename(track)
+			trackPath := filepath.Join(track.SaveDir, track.SaveName)
+
+			// 1) Exact file already exists
+			existsOriginal, err := fileExists(trackPath)
+			if err != nil {
+				fmt.Println("Failed to check if track exists.")
+			} else if existsOriginal {
+				fmt.Println("Track already exists locally.")
+				counter.Total++
+				counter.Success++
+				okDict[playlistId] = append(okDict[playlistId], i)
+				continue
+			}
+
+			// 2) Smart duplicate-by-title check
+			existsDuplicate, duplicatePath, err := duplicateTrackExistsByTitle(track.SaveDir, track.Resp.Attributes.Name)
+			if err != nil {
+				fmt.Println("Failed to check for duplicate track titles.")
+			} else if existsDuplicate && duplicatePath != trackPath {
+				fmt.Printf("Duplicate track already exists locally: %s\n", duplicatePath)
+				counter.Total++
+				counter.Success++
+				okDict[playlistId] = append(okDict[playlistId], i)
+				continue
+			}
+
+			// 3) Only now fetch song metadata / album art
 			trackMeta := meta.Data[0].Relationships.Tracks.Data[i-1]
 			songID := trackMeta.ID
 
-			// Fetch song metadata (already allowed + used elsewhere)
 			songResp, err := ampapi.GetSongResp(storefront, songID, playlist.Language, token)
 			if err == nil && len(songResp.Data) > 0 {
-
-				// Prefer album artwork
 				if len(songResp.Data[0].Relationships.Albums.Data) > 0 {
 					album := songResp.Data[0].Relationships.Albums.Data[0]
 					albumID := album.ID
 
-					// Cache hit
 					if cached, ok := albumCoverCache[albumID]; ok {
-						playlist.Tracks[i-1].CoverPath = cached
+						track.CoverPath = cached
 					} else if album.Attributes.Artwork.URL != "" {
 						coverName := "cover_album_" + albumID
 						covPath, err := writeCover(
@@ -1882,12 +1970,13 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 						)
 						if err == nil {
 							albumCoverCache[albumID] = covPath
-							playlist.Tracks[i-1].CoverPath = covPath
+							track.CoverPath = covPath
 						}
 					}
 				}
 			}
-			ripTrack(&playlist.Tracks[i-1], token, mediaUserToken)
+
+			ripTrack(track, token, mediaUserToken)
 		}
 	}
 	if len(AddedTracks) > startIdx {
